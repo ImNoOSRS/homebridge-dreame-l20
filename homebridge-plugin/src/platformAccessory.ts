@@ -12,54 +12,48 @@ export class DreameL20Accessory {
     private readonly vacuum: Vacuum,
     private readonly log: any,
   ) {
-    this.service = this.accessory.getService(this.platform.api.hap.Service.Fanv2) 
-      || this.accessory.addService(this.platform.api.hap.Service.Fanv2, 'Dreame L20 Ultra');
+    this.service = this.accessory.getService(this.platform.api.hap.Service.Switch)
+      || this.accessory.addService(this.platform.api.hap.Service.Switch, 'Dreame L20 Ultra');
 
-    // Power / Start ↔ Pause
+    // Initial state
+    this.service.updateCharacteristic(this.platform.api.hap.Characteristic.On, false);
+
+    // === Power On/Off ===
     this.service.getCharacteristic(this.platform.api.hap.Characteristic.On)
       .onSet(async (value: CharacteristicValue) => {
         try {
           if (value) {
             const result = await this.vacuum.start();
-            this.log.info(`Start command: ${result.kind}`);
+            this.log.info(`✅ Start command sent: ${result.kind}`);
           } else {
-            const result = await this.vacuum.pause();   // or .dock() / .stop()
-            this.log.info(`Pause command: ${result.kind}`);
+            const result = await this.vacuum.dock();
+            this.log.info(`✅ Stop (dock) command sent: ${result.kind}`);
           }
         } catch (e: any) {
           this.log.error('Command failed:', e.message);
         }
       });
 
-    // Suction level (0-100% in HomeKit → Dreame 0-3 or 0-5)
-    this.service.getCharacteristic(this.platform.api.hap.Characteristic.RotationSpeed)
-      .onSet(async (value: CharacteristicValue) => {
-        const level = Math.round(((value as number) / 100) * 3); // adjust multiplier if needed
-        const result = await this.vacuum.setSuction(level);
-        this.log.info(`Suction set to ${level}: ${result.kind}`);
-      });
-
     // === LIVE STATUS UPDATES ===
     this.vacuum.watch().then(() => {
-      this.log.info('✅ MQTT watch started for live updates');
+      this.log.info('✅ MQTT watch started for L20 Ultra');
 
       this.vacuum.on('change', (state: any) => {
-        this.log.debug('State update received:', state);
+        this.log.debug('Raw state:', JSON.stringify(state, null, 2));
 
-        // Most reliable ways to detect "cleaning" in node-dreame:
-        const isCleaning = 
-          state.taskStatus === 1 ||                    // common running value
-          state.status === 'cleaning' || 
-          state.miotState?.taskStatus === 1 ||
-          (state.status && typeof state.status === 'string' && 
-           ['cleaning', 'running', 'working'].includes(state.status.toLowerCase()));
+        // === STRICT LOGIC FOR YOUR L20 ULTRA ===
+        let isCleaning = false;
+
+        if (state.miotState !== undefined) {
+          isCleaning = (state.miotState === 1);           // 1 = Cleaning, 3 = Stopped
+        }
 
         this.service.updateCharacteristic(
-          this.platform.api.hap.Characteristic.On, 
+          this.platform.api.hap.Characteristic.On,
           isCleaning
         );
 
-        // Optional: Add more later (battery, error, etc.)
+        this.log.info(`Vacuum status → Cleaning: ${isCleaning} (miotState: ${state.miotState}, taskStatusRaw: ${state.taskStatusRaw})`);
       });
     }).catch((e: any) => {
       this.log.error('Failed to start MQTT watch:', e.message);
