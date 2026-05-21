@@ -7,5 +7,8 @@ export declare class DreameL20Accessory {
     private readonly vacuum;
     private readonly log;
     private service;
+    private lastCommandTime;
+    private readonly COMMAND_COOLDOWN_MS;
     constructor(platform: DreameL20Platform, accessory: PlatformAccessory, vacuum: Vacuum, log: any);
+    private executeCommand;
 }

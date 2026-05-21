@@ -24,7 +24,7 @@
     },
     {
       "name": "homebridge-plugin-name",
-      "platform": "DreameL20"
+      "platform": "ExampleHomebridgePlugin"
     }
   ],
   "accessories": []

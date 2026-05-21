@@ -53,4 +53,34 @@ export class DreameL20Accessory {
 
         let isCleaning = false;
         if (state.miotState !== undefined) {
-          isCleaning = (state.miotState === 1)
+          isCleaning = (state.miotState === 1);
+        } else if (state.miotStateRaw !== undefined) {
+          isCleaning = (state.miotStateRaw === 1);
+        } else if (state.taskStatusRaw !== undefined) {
+          isCleaning = (state.taskStatusRaw === 1);
+        }
+
+        this.service.updateCharacteristic(this.platform.api.hap.Characteristic.On, isCleaning);
+        this.log.info(`Device reported → Cleaning: ${isCleaning} (miotState: ${state.miotState})`);
+      });
+    }).catch((e: any) => {
+      this.log.error('Failed to start MQTT watch:', e.message);
+    });
+  }
+
+  private async executeCommand(start: boolean) {
+    try {
+      if (start) {
+        this.log.info('🚀 Starting cleaning...');
+        const result = await this.vacuum.start();
+        this.log.info(`✅ Start completed: ${result.kind}`);
+      } else {
+        this.log.info('🏠 Returning to dock...');
+        const result = await this.vacuum.dock();
+        this.log.info(`✅ Return to dock completed: ${result.kind}`);
+      }
+    } catch (e: any) {
+      this.log.error('Command execution error:', e.message);
+    }
+  }
+}

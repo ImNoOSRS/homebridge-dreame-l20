@@ -1,6 +1,6 @@
 {
   "name": "homebridge-dreame-l20",
-  "displayName": "Test Plugin2",
+  "displayName": "Dreame L20",
   "type": "module",
   "version": "1.0.0",
   "private": true,
