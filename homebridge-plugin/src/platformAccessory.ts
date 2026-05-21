@@ -5,6 +5,8 @@ import { Vacuum } from 'node-dreame';
 
 export class DreameL20Accessory {
   private service: Service;
+  private lastCommandTime: number = 0;
+  private readonly COMMAND_COOLDOWN_MS = 4000; // 4 seconds ignore live updates after command
 
   constructor(
     private readonly platform: DreameL20Platform,
@@ -15,23 +17,24 @@ export class DreameL20Accessory {
     this.service = this.accessory.getService(this.platform.api.hap.Service.Switch)
       || this.accessory.addService(this.platform.api.hap.Service.Switch, 'Dreame L20 Ultra');
 
-    // Initial state
     this.service.updateCharacteristic(this.platform.api.hap.Characteristic.On, false);
 
-    // === Power On/Off ===
+    // === INSTANT On/Off ===
     this.service.getCharacteristic(this.platform.api.hap.Characteristic.On)
-      .onSet(async (value: CharacteristicValue) => {
-        try {
-          if (value) {
-            const result = await this.vacuum.start();
-            this.log.info(`✅ Start command sent: ${result.kind}`);
-          } else {
-            const result = await this.vacuum.dock();
-            this.log.info(`✅ Stop (dock) command sent: ${result.kind}`);
-          }
-        } catch (e: any) {
+      .onSet((value: CharacteristicValue) => {
+        const targetState = !!value;
+        const now = Date.now();
+
+        this.lastCommandTime = now;
+
+        // Immediate feedback to HomeKit
+        this.service.updateCharacteristic(this.platform.api.hap.Characteristic.On, targetState);
+
+        // Run real command in background
+        this.executeCommand(targetState).catch((e: any) => {
           this.log.error('Command failed:', e.message);
-        }
+          this.service.updateCharacteristic(this.platform.api.hap.Characteristic.On, !!targetState);
+        });
       });
 
     // === LIVE STATUS UPDATES ===
@@ -41,22 +44,13 @@ export class DreameL20Accessory {
       this.vacuum.on('change', (state: any) => {
         this.log.debug('Raw state:', JSON.stringify(state, null, 2));
 
-        // === STRICT LOGIC FOR YOUR L20 ULTRA ===
-        let isCleaning = false;
-
-        if (state.miotState !== undefined) {
-          isCleaning = (state.miotState === 1);           // 1 = Cleaning, 3 = Stopped
+        const now = Date.now();
+        // Ignore device updates for 4 seconds after user command
+        if (now - this.lastCommandTime < this.COMMAND_COOLDOWN_MS) {
+          this.log.debug('Ignoring MQTT update during command cooldown');
+          return;
         }
 
-        this.service.updateCharacteristic(
-          this.platform.api.hap.Characteristic.On,
-          isCleaning
-        );
-
-        this.log.info(`Vacuum status → Cleaning: ${isCleaning} (miotState: ${state.miotState}, taskStatusRaw: ${state.taskStatusRaw})`);
-      });
-    }).catch((e: any) => {
-      this.log.error('Failed to start MQTT watch:', e.message);
-    });
-  }
-}
+        let isCleaning = false;
+        if (state.miotState !== undefined) {
+          isCleaning = (state.miotState === 1)
