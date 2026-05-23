@@ -3,7 +3,7 @@ import { DreameL20Platform } from './platform.js';
 import { Vacuum } from 'node-dreame';
 
 export interface RoomConfig {
-  name: string;           // e.g. "Keuken"
+  name: string;
   segmentId: number;
 }
 
@@ -20,25 +20,70 @@ export class DreameL20Accessory {
     private readonly log: any,
   ) {
     const config = this.platform.config as any;
+    const deviceName = config.name || 'Dreame L20 Ultra';
+
+    // Force correct accessory name
+    if (this.accessory.displayName !== deviceName) {
+      this.accessory.displayName = deviceName;
+      this.accessory.updateDisplayName(deviceName);
+    }
 
     // === Main Switch (Full Clean / Dock) ===
     this.mainService = this.accessory.getService('Dreame L20 Ultra')
-      || this.accessory.addService(this.platform.api.hap.Service.Switch, 'Dreame L20 Ultra', 'main');
+      || this.accessory.addService(this.platform.api.hap.Service.Switch, deviceName, 'main');
+
+    this.mainService.setCharacteristic(this.platform.api.hap.Characteristic.Name, deviceName);
+    this.mainService.updateCharacteristic(this.platform.api.hap.Characteristic.On, false);
 
     this.mainService.getCharacteristic(this.platform.api.hap.Characteristic.On)
       .onSet((value: CharacteristicValue) => this.handleMainSwitch(!!value));
 
-    this.mainService.updateCharacteristic(this.platform.api.hap.Characteristic.On, false);
-
-    // === Dynamic Room Services for Siri Voice Commands ===
+    // === Dynamic Room Services ===
     const rooms: RoomConfig[] = config.rooms || [];
+    const enableZuigen = config.enableZuigen !== false;   // default true
+    const enableDweilen = config.enableDweilen !== false; // default true
 
     rooms.forEach(room => {
-      this.createRoomServices(room);
+      this.createRoomServices(room, enableZuigen, enableDweilen);
     });
 
     // === MQTT Live Updates ===
-    this.vacuum.watch().then(() => {
+    this.startMqttWatch();
+  }
+
+  private createRoomServices(room: RoomConfig, enableZuigen: boolean, enableDweilen: boolean) {
+    const base = room.name;
+
+    // Always add full Vacuum + Mop
+    this.addRoomService(`${base} Clean`, `${base.toLowerCase()}_full`, room, 'vacuum_mop');
+
+    // Conditional services
+    if (enableZuigen) {
+      this.addRoomService(`${base} Zuigen`, `${base.toLowerCase()}_vacuum`, room, 'vacuum');
+    }
+    if (enableDweilen) {
+      this.addRoomService(`${base} Dweilen`, `${base.toLowerCase()}_mop`, room, 'mop');
+    }
+
+    this.log.info(`✅ Added services for ${base} (Zuigen: ${enableZuigen}, Dweilen: ${enableDweilen})`);
+  }
+
+  private addRoomService(displayName: string, subtype: string, room: RoomConfig, mode: 'vacuum' | 'mop' | 'vacuum_mop') {
+    const service = this.accessory.getServiceById(displayName, subtype)
+      || this.accessory.addService(this.platform.api.hap.Service.Switch, displayName, subtype);
+
+    service.setCharacteristic(this.platform.api.hap.Characteristic.Name, displayName);
+    service.updateCharacteristic(this.platform.api.hap.Characteristic.On, false);
+
+    service.getCharacteristic(this.platform.api.hap.Characteristic.On)
+      .onSet((value: CharacteristicValue) => this.handleRoomAction(room, mode, !!value));
+
+    this.roomServices.set(subtype, service);
+  }
+
+  private async startMqttWatch() {
+    try {
+      await this.vacuum.watch();
       this.log.info('✅ MQTT watch started for L20 Ultra');
 
       this.vacuum.on('change', (state: any) => {
@@ -48,36 +93,9 @@ export class DreameL20Accessory {
         const isCleaning = this.isCurrentlyCleaning(state);
         this.mainService.updateCharacteristic(this.platform.api.hap.Characteristic.On, isCleaning);
       });
-    }).catch((e: any) => {
+    } catch (e: any) {
       this.log.error('Failed to start MQTT watch:', e.message);
-    });
-  }
-
-  private createRoomServices(room: RoomConfig) {
-    const base = room.name;
-
-    // 1. Vacuum + Mop (Best for "clean Keuken")
-    this.addRoomService(`${base} Clean`, `${base.toLowerCase()}_full`, room, 'vacuum_mop');
-
-    // 2. Vacuum Only ("zuig Keuken")
-    this.addRoomService(`${base} Zuigen`, `${base.toLowerCase()}_vacuum`, room, 'vacuum');
-
-    // 3. Mop Only ("dweil Keuken")
-    this.addRoomService(`${base} Dweilen`, `${base.toLowerCase()}_mop`, room, 'mop');
-
-    this.log.info(`✅ Added Siri services for ${base} (Segment ${room.segmentId})`);
-  }
-
-  private addRoomService(displayName: string, subtype: string, room: RoomConfig, mode: 'vacuum' | 'mop' | 'vacuum_mop') {
-    const service = this.accessory.getServiceById(displayName, subtype)
-      || this.accessory.addService(this.platform.api.hap.Service.Switch, displayName, subtype);
-
-    service.getCharacteristic(this.platform.api.hap.Characteristic.On)
-      .onSet((value: CharacteristicValue) => this.handleRoomAction(room, mode, !!value));
-
-    service.updateCharacteristic(this.platform.api.hap.Characteristic.On, false);
-
-    this.roomServices.set(subtype, service);
+    }
   }
 
   private async handleMainSwitch(start: boolean) {
@@ -105,34 +123,25 @@ export class DreameL20Accessory {
     if (!start) return;
 
     this.lastCommandTime = Date.now();
-
-    const subtype = `${room.name.toLowerCase()}_${mode === 'vacuum_mop' ? 'full' : mode === 'vacuum' ? 'vacuum' : 'mop'}`;
+    const subtype = `${room.name.toLowerCase()}_${mode === 'vacuum_mop' ? 'full' : mode}`;
     const service = this.roomServices.get(subtype)!;
 
     try {
       this.log.info(`🧹 Starting ${room.name} → ${mode.toUpperCase()}`);
 
-      // Set suction and water levels based on mode
-      if (mode === 'vacuum' || mode === 'vacuum_mop') {
-        await this.vacuum.setSuction(3);        // Adjust default as you like
-      }
-      if (mode === 'mop' || mode === 'vacuum_mop') {
-        await this.vacuum.setWaterVolume(2);    // Adjust default as you like
-      }
-
-      // Execute segment cleaning
+      const vacuumAny = this.vacuum as any;
       const segmentIds = [room.segmentId];
 
-      if (typeof (this.vacuum as any).cleanSegments === 'function') {
-        await (this.vacuum as any).cleanSegments(segmentIds);
-      } else if (typeof (this.vacuum as any).cleanSegment === 'function') {
-        await (this.vacuum as any).cleanSegment(room.segmentId);
+      if (typeof vacuumAny.cleanSegments === 'function') {
+        const opts = this.getCleanOptions(mode);
+        await vacuumAny.cleanSegments(segmentIds, opts);
+      } else if (typeof vacuumAny.cleanSegment === 'function') {
+        await vacuumAny.cleanSegment(room.segmentId);
       } else {
-        this.log.warn('cleanSegments not available, falling back to start()');
         await this.vacuum.start();
       }
 
-      // Reset switch (since segment cleaning is fire-and-forget)
+      // Auto-reset switch
       setTimeout(() => {
         service.updateCharacteristic(this.platform.api.hap.Characteristic.On, false);
       }, 2500);
@@ -143,10 +152,23 @@ export class DreameL20Accessory {
     }
   }
 
+  private getCleanOptions(mode: 'vacuum' | 'mop' | 'vacuum_mop') {
+    switch (mode) {
+      case 'vacuum':
+        return { fan: 2, water: 0 };
+      case 'mop':
+        return { fan: 0, water: 2 };
+      case 'vacuum_mop':
+        return { fan: 2, water: 2 };
+      default:
+        return { fan: 2, water: 2 };
+    }
+  }
+
   private isCurrentlyCleaning(state: any): boolean {
-    return state.miotState === 1 || 
-           state.miotStateRaw === 1 || 
-           state.taskStatusRaw === 1 || 
+    return state.miotState === 1 ||
+           state.miotStateRaw === 1 ||
+           state.taskStatusRaw === 1 ||
            false;
   }
 }

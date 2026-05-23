@@ -5,31 +5,58 @@
   "schema": {
     "type": "object",
     "required": ["name", "email", "password"],
+    "additionalProperties": false,
     "properties": {
-      "name": { "title": "Name", "type": "string", "default": "Dreame L20 Ultra" },
-      "email": { "title": "Dreame Home Email", "type": "string", "format": "email" },
-      "password": { "title": "Dreame Home Password", "type": "string", "format": "password" },
-      "region": { "title": "Region", "type": "string", "default": "eu", "enum": ["eu", "us", "cn", "ru", "sg", "in", "de", "tw"] },
-      "deviceId": { "title": "Device DID (optional)", "type": "string" },
-
+      "name": {
+        "title": "Name",
+        "type": "string",
+        "default": "Dreame L20 Ultra"
+      },
+      "email": {
+        "title": "Dreame Home Email",
+        "type": "string",
+        "format": "email"
+      },
+      "password": {
+        "title": "Dreame Home Password",
+        "type": "string",
+        "format": "password"
+      },
+      "region": {
+        "title": "Region",
+        "type": "string",
+        "default": "eu",
+        "enum": ["eu", "us", "cn", "ru", "sg", "in", "de", "tw"]
+      },
+      "deviceId": {
+        "title": "Device DID (optional)",
+        "type": "string"
+      },
+      "keukenSegmentId": {
+        "title": "Keuken Segment ID",
+        "type": "integer",
+        "default": 1
+      },
       "rooms": {
-        "title": "Custom Rooms",
+        "title": "Rooms",
         "type": "array",
         "items": {
           "type": "object",
           "properties": {
-            "name": { "type": "string", "title": "Room Name" },
-            "segmentId": { "type": "integer", "title": "Segment ID" },
-            "mode": { 
-              "type": "string", 
-              "enum": ["vacuum", "mop", "vacuum_mop"], 
-              "default": "vacuum_mop" 
-            },
-            "suction": { "type": "integer", "minimum": 1, "maximum": 4, "default": 2 },
-            "water": { "type": "integer", "minimum": 0, "maximum": 3, "default": 2 }
-          },
-          "required": ["name", "segmentId"]
+            "name": { "type": "string" },
+            "segmentId": { "type": "integer" }
+          }
         }
+      },
+      "enableZuigen": {
+        "title": "Enable 'Zuigen' (Vacuum Only) buttons",
+        "type": "boolean",
+        "default": true
+      },
+      "enableDweilen": {
+        "title": "Enable 'Dweilen' (Mop Only) buttons",
+        "type": "boolean",
+        "default": true
       }
     }
   }
