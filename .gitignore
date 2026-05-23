@@ -75,3 +75,4 @@ temp/
 .vercel/
 .netlify/
 homebridge-plugin/test.ts
+homebridge-plugin/test2.ts
