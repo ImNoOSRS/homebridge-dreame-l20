@@ -2,9 +2,17 @@ import { Service, PlatformAccessory, CharacteristicValue } from 'homebridge';
 import { DreameL20Platform } from './platform.js';
 import { Vacuum } from 'node-dreame';
 
+export interface RoomConfig {
+  name: string;
+  segmentId: number;
+  mode?: 'vacuum' | 'mop' | 'vacuum_mop';
+  suction?: number;
+  water?: number;
+}
+
 export class DreameL20Accessory {
   private mainService: Service;
-  private keukenService: Service;        // New: Keuken button
+  private roomServices: Map<string, Service> = new Map(); // name -> Service
   private lastCommandTime: number = 0;
   private readonly COMMAND_COOLDOWN_MS = 4000;
 
@@ -21,18 +29,24 @@ export class DreameL20Accessory {
       || this.accessory.addService(this.platform.api.hap.Service.Switch, 'Dreame L20 Ultra', 'main');
 
     this.mainService.updateCharacteristic(this.platform.api.hap.Characteristic.On, false);
-
     this.mainService.getCharacteristic(this.platform.api.hap.Characteristic.On)
       .onSet((value: CharacteristicValue) => this.handleMainSwitch(!!value));
 
-    // === Keuken Cleaning Button (new) ===
-    this.keukenService = this.accessory.getService('Keuken Cleaning')
-      || this.accessory.addService(this.platform.api.hap.Service.Switch, 'Keuken Cleaning', 'keuken');
+    // === Dynamic Room Services ===
+    const rooms: RoomConfig[] = config.rooms || [];
+    
+    rooms.forEach(room => {
+      const serviceName = `${room.name} Cleaning`;
+      const service = this.accessory.getService(serviceName)
+        || this.accessory.addService(this.platform.api.hap.Service.Switch, serviceName, room.name.toLowerCase());
 
-    this.keukenService.updateCharacteristic(this.platform.api.hap.Characteristic.On, false);
+      service.updateCharacteristic(this.platform.api.hap.Characteristic.On, false);
+      service.getCharacteristic(this.platform.api.hap.Characteristic.On)
+        .onSet((value: CharacteristicValue) => this.handleRoomCleaning(room, !!value));
 
-    this.keukenService.getCharacteristic(this.platform.api.hap.Characteristic.On)
-      .onSet((value: CharacteristicValue) => this.handleKeukenCleaning(!!value));
+      this.roomServices.set(room.name, service);
+      this.log.info(`✅ Added room switch: ${room.name} (ID: ${room.segmentId})`);
+    });
 
     // === MQTT Live Updates ===
     this.vacuum.watch().then(() => {
@@ -71,39 +85,47 @@ export class DreameL20Accessory {
     }
   }
 
-  private async handleKeukenCleaning(start: boolean) {
-    const config = this.platform.config as any;
-    const segmentId = config.keukenSegmentId || 1;
-
-    this.lastCommandTime = Date.now();
-    this.keukenService.updateCharacteristic(this.platform.api.hap.Characteristic.On, start);
-
+  private async handleRoomCleaning(room: RoomConfig, start: boolean) {
     if (!start) {
-      this.log.info('Keuken button turned off → ignoring (segment cleaning has no stop)');
+      this.log.info(`Room button "${room.name}" turned off → ignoring (segment cleaning is one-shot)`);
       return;
     }
 
+    this.lastCommandTime = Date.now();
+    const service = this.roomServices.get(room.name)!;
+    service.updateCharacteristic(this.platform.api.hap.Characteristic.On, true);
+
     try {
-      this.log.info(`🧹 Starting Keuken cleaning (Segment ${segmentId})...`);
-      
-      // node-dreame typically supports cleanSegments([id])
+      this.log.info(`🧹 Starting cleaning: ${room.name} | Mode: ${room.mode || 'vacuum_mop'}`);
+
+      // Set cleaning parameters
+      if (room.suction) {
+        await this.vacuum.setSuction(room.suction);
+      }
+      if (room.water !== undefined && this.vacuum.capabilities?.canMop) {
+        await this.vacuum.setWaterVolume(room.water);
+      }
+
+      // Clean the segment
+      const segmentIds = [room.segmentId];
+
       if (typeof (this.vacuum as any).cleanSegments === 'function') {
-        await (this.vacuum as any).cleanSegments([segmentId]);
+        await (this.vacuum as any).cleanSegments(segmentIds);
       } else if (typeof (this.vacuum as any).cleanSegment === 'function') {
-        await (this.vacuum as any).cleanSegment(segmentId);
+        await (this.vacuum as any).cleanSegment(room.segmentId);
       } else {
-        this.log.warn('cleanSegments / cleanSegment not found in node-dreame. Falling back to start()');
+        this.log.warn('cleanSegments not found, falling back to start()');
         await this.vacuum.start();
       }
 
-      // Turn switch back off after a short delay (since segment cleaning is a one-shot action)
+      // Reset switch after short delay
       setTimeout(() => {
-        this.keukenService.updateCharacteristic(this.platform.api.hap.Characteristic.On, false);
-      }, 2000);
+        service.updateCharacteristic(this.platform.api.hap.Characteristic.On, false);
+      }, 2500);
 
     } catch (e: any) {
-      this.log.error('Keuken cleaning failed:', e.message);
-      this.keukenService.updateCharacteristic(this.platform.api.hap.Characteristic.On, false);
+      this.log.error(`Cleaning "${room.name}" failed:`, e.message);
+      service.updateCharacteristic(this.platform.api.hap.Characteristic.On, false);
     }
   }
 }
