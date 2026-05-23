@@ -1,12 +1,12 @@
-// src/platformAccessory.ts
 import { Service, PlatformAccessory, CharacteristicValue } from 'homebridge';
 import { DreameL20Platform } from './platform.js';
 import { Vacuum } from 'node-dreame';
 
 export class DreameL20Accessory {
-  private service: Service;
+  private mainService: Service;
+  private keukenService: Service;        // New: Keuken button
   private lastCommandTime: number = 0;
-  private readonly COMMAND_COOLDOWN_MS = 4000; // 4 seconds ignore live updates after command
+  private readonly COMMAND_COOLDOWN_MS = 4000;
 
   constructor(
     private readonly platform: DreameL20Platform,
@@ -14,73 +14,96 @@ export class DreameL20Accessory {
     private readonly vacuum: Vacuum,
     private readonly log: any,
   ) {
-    this.service = this.accessory.getService(this.platform.api.hap.Service.Switch)
-      || this.accessory.addService(this.platform.api.hap.Service.Switch, 'Dreame L20 Ultra');
+    const config = this.platform.config as any;
 
-    this.service.updateCharacteristic(this.platform.api.hap.Characteristic.On, false);
+    // === Main Power / Full Clean Switch ===
+    this.mainService = this.accessory.getService(this.platform.api.hap.Service.Switch)
+      || this.accessory.addService(this.platform.api.hap.Service.Switch, 'Dreame L20 Ultra', 'main');
 
-    // === INSTANT On/Off ===
-    this.service.getCharacteristic(this.platform.api.hap.Characteristic.On)
-      .onSet((value: CharacteristicValue) => {
-        const targetState = !!value;
-        const now = Date.now();
+    this.mainService.updateCharacteristic(this.platform.api.hap.Characteristic.On, false);
 
-        this.lastCommandTime = now;
+    this.mainService.getCharacteristic(this.platform.api.hap.Characteristic.On)
+      .onSet((value: CharacteristicValue) => this.handleMainSwitch(!!value));
 
-        // Immediate feedback to HomeKit
-        this.service.updateCharacteristic(this.platform.api.hap.Characteristic.On, targetState);
+    // === Keuken Cleaning Button (new) ===
+    this.keukenService = this.accessory.getService('Keuken Cleaning')
+      || this.accessory.addService(this.platform.api.hap.Service.Switch, 'Keuken Cleaning', 'keuken');
 
-        // Run real command in background
-        this.executeCommand(targetState).catch((e: any) => {
-          this.log.error('Command failed:', e.message);
-          this.service.updateCharacteristic(this.platform.api.hap.Characteristic.On, !!targetState);
-        });
-      });
+    this.keukenService.updateCharacteristic(this.platform.api.hap.Characteristic.On, false);
 
-    // === LIVE STATUS UPDATES ===
+    this.keukenService.getCharacteristic(this.platform.api.hap.Characteristic.On)
+      .onSet((value: CharacteristicValue) => this.handleKeukenCleaning(!!value));
+
+    // === MQTT Live Updates ===
     this.vacuum.watch().then(() => {
       this.log.info('✅ MQTT watch started for L20 Ultra');
 
       this.vacuum.on('change', (state: any) => {
-        this.log.debug('Raw state:', JSON.stringify(state, null, 2));
-
         const now = Date.now();
-        // Ignore device updates for 4 seconds after user command
-        if (now - this.lastCommandTime < this.COMMAND_COOLDOWN_MS) {
-          this.log.debug('Ignoring MQTT update during command cooldown');
-          return;
-        }
+        if (now - this.lastCommandTime < this.COMMAND_COOLDOWN_MS) return;
 
-        let isCleaning = false;
-        if (state.miotState !== undefined) {
-          isCleaning = (state.miotState === 1);
-        } else if (state.miotStateRaw !== undefined) {
-          isCleaning = (state.miotStateRaw === 1);
-        } else if (state.taskStatusRaw !== undefined) {
-          isCleaning = (state.taskStatusRaw === 1);
-        }
-
-        this.service.updateCharacteristic(this.platform.api.hap.Characteristic.On, isCleaning);
-        this.log.info(`Device reported → Cleaning: ${isCleaning} (miotState: ${state.miotState})`);
+        const isCleaning = this.isCurrentlyCleaning(state);
+        this.mainService.updateCharacteristic(this.platform.api.hap.Characteristic.On, isCleaning);
       });
     }).catch((e: any) => {
       this.log.error('Failed to start MQTT watch:', e.message);
     });
   }
 
-  private async executeCommand(start: boolean) {
+  private isCurrentlyCleaning(state: any): boolean {
+    return state.miotState === 1 || state.miotStateRaw === 1 || state.taskStatusRaw === 1 || false;
+  }
+
+  private async handleMainSwitch(start: boolean) {
+    this.lastCommandTime = Date.now();
+    this.mainService.updateCharacteristic(this.platform.api.hap.Characteristic.On, start);
+
     try {
       if (start) {
-        this.log.info('🚀 Starting cleaning...');
-        const result = await this.vacuum.start();
-        this.log.info(`✅ Start completed: ${result.kind}`);
+        this.log.info('🚀 Starting full cleaning...');
+        await this.vacuum.start();
       } else {
         this.log.info('🏠 Returning to dock...');
-        const result = await this.vacuum.dock();
-        this.log.info(`✅ Return to dock completed: ${result.kind}`);
+        await this.vacuum.dock();
       }
     } catch (e: any) {
-      this.log.error('Command execution error:', e.message);
+      this.log.error('Main command failed:', e.message);
+    }
+  }
+
+  private async handleKeukenCleaning(start: boolean) {
+    const config = this.platform.config as any;
+    const segmentId = config.keukenSegmentId || 1;
+
+    this.lastCommandTime = Date.now();
+    this.keukenService.updateCharacteristic(this.platform.api.hap.Characteristic.On, start);
+
+    if (!start) {
+      this.log.info('Keuken button turned off → ignoring (segment cleaning has no stop)');
+      return;
+    }
+
+    try {
+      this.log.info(`🧹 Starting Keuken cleaning (Segment ${segmentId})...`);
+      
+      // node-dreame typically supports cleanSegments([id])
+      if (typeof (this.vacuum as any).cleanSegments === 'function') {
+        await (this.vacuum as any).cleanSegments([segmentId]);
+      } else if (typeof (this.vacuum as any).cleanSegment === 'function') {
+        await (this.vacuum as any).cleanSegment(segmentId);
+      } else {
+        this.log.warn('cleanSegments / cleanSegment not found in node-dreame. Falling back to start()');
+        await this.vacuum.start();
+      }
+
+      // Turn switch back off after a short delay (since segment cleaning is a one-shot action)
+      setTimeout(() => {
+        this.keukenService.updateCharacteristic(this.platform.api.hap.Characteristic.On, false);
+      }, 2000);
+
+    } catch (e: any) {
+      this.log.error('Keuken cleaning failed:', e.message);
+      this.keukenService.updateCharacteristic(this.platform.api.hap.Characteristic.On, false);
     }
   }
 }

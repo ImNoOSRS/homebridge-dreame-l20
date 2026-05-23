@@ -10,7 +10,7 @@ export class DreameL20Platform implements DynamicPlatformPlugin {
 
   constructor(
     private readonly log: Logger,
-    private readonly config: PlatformConfig,
+    public readonly config: PlatformConfig,
     api: API,                                   // ← Keep parameter name
   ) {
     this.api = api;                             // ← Assign to public property

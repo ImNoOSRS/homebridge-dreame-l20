@@ -32,6 +32,12 @@
         "title": "Device DID (optional)",
         "type": "string",
         "description": "Leave empty to auto-detect"
+      },
+      "keukenSegmentId": {
+        "title": "Keuken Segment ID",
+        "type": "integer",
+        "description": "Segment ID for the kitchen (find this in the Dreame app or map data)",
+        "default": 1
       }
     }
   }
