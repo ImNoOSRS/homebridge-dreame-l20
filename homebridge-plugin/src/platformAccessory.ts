@@ -33,8 +33,11 @@ export class DreameL20Accessory {
     // === Dynamic Room Services for Siri Voice Commands ===
     const rooms: RoomConfig[] = config.rooms || [];
 
+    const enableZuigen = config.enableZuigen !== false;   // default true
+    const enableDweilen = config.enableDweilen !== false; // default true
+
     rooms.forEach(room => {
-      this.createRoomServices(room);
+      this.createRoomServices(room, enableZuigen, enableDweilen);
     });
 
     // === MQTT Live Updates ===
@@ -53,14 +56,19 @@ export class DreameL20Accessory {
     });
   }
 
-  private createRoomServices(room: RoomConfig) {
+private createRoomServices(room: RoomConfig, enableZuigen: boolean, enableDweilen: boolean) {
     const base = room.name;
 
     this.addRoomService(`${base} Clean`,   `${base.toLowerCase()}_full`,   room, 'vacuum_mop');
-    this.addRoomService(`${base} Zuigen`,  `${base.toLowerCase()}_vacuum`, room, 'vacuum');
-    this.addRoomService(`${base} Dweilen`, `${base.toLowerCase()}_mop`,    room, 'mop');
+    // Conditional services
+    if (enableZuigen) {
+      this.addRoomService(`${base} Zuigen`, `${base.toLowerCase()}_vacuum`, room, 'vacuum');
+    }
+    if (enableDweilen) {
+      this.addRoomService(`${base} Dweilen`, `${base.toLowerCase()}_mop`, room, 'mop');
+    }
 
-    this.log.info(`✅ Added Siri services for ${base} (Segment ${room.segmentId})`);
+    this.log.info(`✅ Added services for ${base} (Zuigen: ${enableZuigen}, Dweilen: ${enableDweilen})`);
   }
 
   private addRoomService(displayName: string, subtype: string, room: RoomConfig, mode: 'vacuum' | 'mop' | 'vacuum_mop') {
