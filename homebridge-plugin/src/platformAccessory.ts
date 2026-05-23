@@ -2,9 +2,14 @@ import { Service, PlatformAccessory, CharacteristicValue } from 'homebridge';
 import { DreameL20Platform } from './platform.js';
 import { Vacuum } from 'node-dreame';
 
+export interface RoomConfig {
+  name: string;           // e.g. "Keuken"
+  segmentId: number;
+}
+
 export class DreameL20Accessory {
   private mainService: Service;
-  private keukenService: Service;
+  private roomServices: Map<string, Service> = new Map(); // subtype -> Service
   private lastCommandTime: number = 0;
   private readonly COMMAND_COOLDOWN_MS = 4000;
 
@@ -15,67 +20,64 @@ export class DreameL20Accessory {
     private readonly log: any,
   ) {
     const config = this.platform.config as any;
-    const deviceName = config.name || 'Dreame L20 Ultra';
 
-    // === Force correct accessory name ===
-    if (this.accessory.displayName !== deviceName) {
-      this.accessory.displayName = deviceName;
-      this.accessory.updateDisplayName(deviceName);
-    }
-
-    // === Main Switch - Full Clean ===
-    this.mainService = this.accessory.getService('Main')
-      || this.accessory.addService(this.platform.api.hap.Service.Switch, deviceName, 'main');
-
-    this.mainService.setCharacteristic(this.platform.api.hap.Characteristic.Name, deviceName);
-    this.mainService.updateCharacteristic(this.platform.api.hap.Characteristic.On, false);
+    // === Main Switch (Full Clean / Dock) ===
+    this.mainService = this.accessory.getService('Dreame L20 Ultra')
+      || this.accessory.addService(this.platform.api.hap.Service.Switch, 'Dreame L20 Ultra', 'main');
 
     this.mainService.getCharacteristic(this.platform.api.hap.Characteristic.On)
       .onSet((value: CharacteristicValue) => this.handleMainSwitch(!!value));
 
-    // === Keuken Cleaning Switch ===
-    const keukenName = `${deviceName} - Keuken`;
+    this.mainService.updateCharacteristic(this.platform.api.hap.Characteristic.On, false);
 
-    this.keukenService = this.accessory.getService('Keuken')
-      || this.accessory.addService(this.platform.api.hap.Service.Switch, keukenName, 'keuken');
+    // === Dynamic Room Services for Siri Voice Commands ===
+    const rooms: RoomConfig[] = config.rooms || [];
 
-    this.keukenService.setCharacteristic(this.platform.api.hap.Characteristic.Name, keukenName);
-    this.keukenService.updateCharacteristic(this.platform.api.hap.Characteristic.On, false);
+    rooms.forEach(room => {
+      this.createRoomServices(room);
+    });
 
-    this.keukenService.getCharacteristic(this.platform.api.hap.Characteristic.On)
-      .onSet((value: CharacteristicValue) => this.handleKeukenCleaning(!!value));
-
-    // === Start MQTT Live Updates ===
-    this.startMqttWatch();
-  }
-
-  private async startMqttWatch() {
-    try {
-      await this.vacuum.watch();
+    // === MQTT Live Updates ===
+    this.vacuum.watch().then(() => {
       this.log.info('✅ MQTT watch started for L20 Ultra');
 
       this.vacuum.on('change', (state: any) => {
         const now = Date.now();
-        if (now - this.lastCommandTime < this.COMMAND_COOLDOWN_MS) {
-          this.log.debug('Ignoring MQTT update during command cooldown');
-          return;
-        }
+        if (now - this.lastCommandTime < this.COMMAND_COOLDOWN_MS) return;
 
         const isCleaning = this.isCurrentlyCleaning(state);
         this.mainService.updateCharacteristic(this.platform.api.hap.Characteristic.On, isCleaning);
-
-        this.log.debug(`Status update → Cleaning: ${isCleaning}`);
       });
-    } catch (e: any) {
+    }).catch((e: any) => {
       this.log.error('Failed to start MQTT watch:', e.message);
-    }
+    });
   }
 
-  private isCurrentlyCleaning(state: any): boolean {
-    if (state.miotState !== undefined) return state.miotState === 1;
-    if (state.miotStateRaw !== undefined) return state.miotStateRaw === 1;
-    if (state.taskStatusRaw !== undefined) return state.taskStatusRaw === 1;
-    return false;
+  private createRoomServices(room: RoomConfig) {
+    const base = room.name;
+
+    // 1. Vacuum + Mop (Best for "clean Keuken")
+    this.addRoomService(`${base} Clean`, `${base.toLowerCase()}_full`, room, 'vacuum_mop');
+
+    // 2. Vacuum Only ("zuig Keuken")
+    this.addRoomService(`${base} Zuigen`, `${base.toLowerCase()}_vacuum`, room, 'vacuum');
+
+    // 3. Mop Only ("dweil Keuken")
+    this.addRoomService(`${base} Dweilen`, `${base.toLowerCase()}_mop`, room, 'mop');
+
+    this.log.info(`✅ Added Siri services for ${base} (Segment ${room.segmentId})`);
+  }
+
+  private addRoomService(displayName: string, subtype: string, room: RoomConfig, mode: 'vacuum' | 'mop' | 'vacuum_mop') {
+    const service = this.accessory.getServiceById(displayName, subtype)
+      || this.accessory.addService(this.platform.api.hap.Service.Switch, displayName, subtype);
+
+    service.getCharacteristic(this.platform.api.hap.Characteristic.On)
+      .onSet((value: CharacteristicValue) => this.handleRoomAction(room, mode, !!value));
+
+    service.updateCharacteristic(this.platform.api.hap.Characteristic.On, false);
+
+    this.roomServices.set(subtype, service);
   }
 
   private async handleMainSwitch(start: boolean) {
@@ -95,40 +97,56 @@ export class DreameL20Accessory {
     }
   }
 
-  private async handleKeukenCleaning(start: boolean) {
-    const config = this.platform.config as any;
-    const segmentId = config.keukenSegmentId || 1;
+  private async handleRoomAction(
+    room: RoomConfig,
+    mode: 'vacuum' | 'mop' | 'vacuum_mop',
+    start: boolean
+  ) {
+    if (!start) return;
 
     this.lastCommandTime = Date.now();
-    this.keukenService.updateCharacteristic(this.platform.api.hap.Characteristic.On, start);
 
-    if (!start) {
-      this.log.info('Keuken button turned off → no action needed');
-      return;
-    }
+    const subtype = `${room.name.toLowerCase()}_${mode === 'vacuum_mop' ? 'full' : mode === 'vacuum' ? 'vacuum' : 'mop'}`;
+    const service = this.roomServices.get(subtype)!;
 
     try {
-      this.log.info(`🧹 Starting Keuken cleaning (Segment ${segmentId})...`);
+      this.log.info(`🧹 Starting ${room.name} → ${mode.toUpperCase()}`);
 
-      const vacuumAny = this.vacuum as any;
+      // Set suction and water levels based on mode
+      if (mode === 'vacuum' || mode === 'vacuum_mop') {
+        await this.vacuum.setSuction(3);        // Adjust default as you like
+      }
+      if (mode === 'mop' || mode === 'vacuum_mop') {
+        await this.vacuum.setWaterVolume(2);    // Adjust default as you like
+      }
 
-      if (typeof vacuumAny.cleanSegments === 'function') {
-        await vacuumAny.cleanSegments([segmentId]);
-      } else if (typeof vacuumAny.cleanSegment === 'function') {
-        await vacuumAny.cleanSegment(segmentId);
+      // Execute segment cleaning
+      const segmentIds = [room.segmentId];
+
+      if (typeof (this.vacuum as any).cleanSegments === 'function') {
+        await (this.vacuum as any).cleanSegments(segmentIds);
+      } else if (typeof (this.vacuum as any).cleanSegment === 'function') {
+        await (this.vacuum as any).cleanSegment(room.segmentId);
       } else {
-        this.log.warn('cleanSegment(s) not available, falling back to start()');
+        this.log.warn('cleanSegments not available, falling back to start()');
         await this.vacuum.start();
       }
 
-      // Auto turn off the switch after triggering (segment cleaning is one-shot)
+      // Reset switch (since segment cleaning is fire-and-forget)
       setTimeout(() => {
-        this.keukenService.updateCharacteristic(this.platform.api.hap.Characteristic.On, false);
+        service.updateCharacteristic(this.platform.api.hap.Characteristic.On, false);
       }, 2500);
 
     } catch (e: any) {
-      this.log.error('Keuken cleaning failed:', e.message);
-      this.keukenService.updateCharacteristic(this.platform.api.hap.Characteristic.On, false);
+      this.log.error(`Failed to clean ${room.name}:`, e.message);
+      service.updateCharacteristic(this.platform.api.hap.Characteristic.On, false);
     }
+  }
+
+  private isCurrentlyCleaning(state: any): boolean {
+    return state.miotState === 1 || 
+           state.miotStateRaw === 1 || 
+           state.taskStatusRaw === 1 || 
+           false;
   }
 }
