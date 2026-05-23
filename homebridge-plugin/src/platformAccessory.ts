@@ -3,16 +3,13 @@ import { DreameL20Platform } from './platform.js';
 import { Vacuum } from 'node-dreame';
 
 export interface RoomConfig {
-  name: string;
+  name: string;           // e.g. "Keuken"
   segmentId: number;
-  mode?: 'vacuum' | 'mop' | 'vacuum_mop';
-  suction?: number;
-  water?: number;
 }
 
 export class DreameL20Accessory {
   private mainService: Service;
-  private roomServices: Map<string, Service> = new Map(); // name -> Service
+  private roomServices: Map<string, Service> = new Map(); // subtype -> Service
   private lastCommandTime: number = 0;
   private readonly COMMAND_COOLDOWN_MS = 4000;
 
@@ -24,28 +21,20 @@ export class DreameL20Accessory {
   ) {
     const config = this.platform.config as any;
 
-    // === Main Power / Full Clean Switch ===
-    this.mainService = this.accessory.getService(this.platform.api.hap.Service.Switch)
+    // === Main Switch (Full Clean / Dock) ===
+    this.mainService = this.accessory.getService('Dreame L20 Ultra')
       || this.accessory.addService(this.platform.api.hap.Service.Switch, 'Dreame L20 Ultra', 'main');
 
-    this.mainService.updateCharacteristic(this.platform.api.hap.Characteristic.On, false);
     this.mainService.getCharacteristic(this.platform.api.hap.Characteristic.On)
       .onSet((value: CharacteristicValue) => this.handleMainSwitch(!!value));
 
-    // === Dynamic Room Services ===
+    this.mainService.updateCharacteristic(this.platform.api.hap.Characteristic.On, false);
+
+    // === Dynamic Room Services for Siri Voice Commands ===
     const rooms: RoomConfig[] = config.rooms || [];
-    
+
     rooms.forEach(room => {
-      const serviceName = `${room.name} Cleaning`;
-      const service = this.accessory.getService(serviceName)
-        || this.accessory.addService(this.platform.api.hap.Service.Switch, serviceName, room.name.toLowerCase());
-
-      service.updateCharacteristic(this.platform.api.hap.Characteristic.On, false);
-      service.getCharacteristic(this.platform.api.hap.Characteristic.On)
-        .onSet((value: CharacteristicValue) => this.handleRoomCleaning(room, !!value));
-
-      this.roomServices.set(room.name, service);
-      this.log.info(`✅ Added room switch: ${room.name} (ID: ${room.segmentId})`);
+      this.createRoomServices(room);
     });
 
     // === MQTT Live Updates ===
@@ -64,8 +53,31 @@ export class DreameL20Accessory {
     });
   }
 
-  private isCurrentlyCleaning(state: any): boolean {
-    return state.miotState === 1 || state.miotStateRaw === 1 || state.taskStatusRaw === 1 || false;
+  private createRoomServices(room: RoomConfig) {
+    const base = room.name;
+
+    // 1. Vacuum + Mop (Best for "clean Keuken")
+    this.addRoomService(`${base} Clean`, `${base.toLowerCase()}_full`, room, 'vacuum_mop');
+
+    // 2. Vacuum Only ("zuig Keuken")
+    this.addRoomService(`${base} Zuigen`, `${base.toLowerCase()}_vacuum`, room, 'vacuum');
+
+    // 3. Mop Only ("dweil Keuken")
+    this.addRoomService(`${base} Dweilen`, `${base.toLowerCase()}_mop`, room, 'mop');
+
+    this.log.info(`✅ Added Siri services for ${base} (Segment ${room.segmentId})`);
+  }
+
+  private addRoomService(displayName: string, subtype: string, room: RoomConfig, mode: 'vacuum' | 'mop' | 'vacuum_mop') {
+    const service = this.accessory.getServiceById(displayName, subtype)
+      || this.accessory.addService(this.platform.api.hap.Service.Switch, displayName, subtype);
+
+    service.getCharacteristic(this.platform.api.hap.Characteristic.On)
+      .onSet((value: CharacteristicValue) => this.handleRoomAction(room, mode, !!value));
+
+    service.updateCharacteristic(this.platform.api.hap.Characteristic.On, false);
+
+    this.roomServices.set(subtype, service);
   }
 
   private async handleMainSwitch(start: boolean) {
@@ -85,28 +97,30 @@ export class DreameL20Accessory {
     }
   }
 
-  private async handleRoomCleaning(room: RoomConfig, start: boolean) {
-    if (!start) {
-      this.log.info(`Room button "${room.name}" turned off → ignoring (segment cleaning is one-shot)`);
-      return;
-    }
+  private async handleRoomAction(
+    room: RoomConfig,
+    mode: 'vacuum' | 'mop' | 'vacuum_mop',
+    start: boolean
+  ) {
+    if (!start) return;
 
     this.lastCommandTime = Date.now();
-    const service = this.roomServices.get(room.name)!;
-    service.updateCharacteristic(this.platform.api.hap.Characteristic.On, true);
+
+    const subtype = `${room.name.toLowerCase()}_${mode === 'vacuum_mop' ? 'full' : mode === 'vacuum' ? 'vacuum' : 'mop'}`;
+    const service = this.roomServices.get(subtype)!;
 
     try {
-      this.log.info(`🧹 Starting cleaning: ${room.name} | Mode: ${room.mode || 'vacuum_mop'}`);
+      this.log.info(`🧹 Starting ${room.name} → ${mode.toUpperCase()}`);
 
-      // Set cleaning parameters
-      if (room.suction) {
-        await this.vacuum.setSuction(room.suction);
+      // Set suction and water levels based on mode
+      if (mode === 'vacuum' || mode === 'vacuum_mop') {
+        await this.vacuum.setSuction(3);        // Adjust default as you like
       }
-      if (room.water !== undefined && this.vacuum.capabilities?.canMop) {
-        await this.vacuum.setWaterVolume(room.water);
+      if (mode === 'mop' || mode === 'vacuum_mop') {
+        await this.vacuum.setWaterVolume(2);    // Adjust default as you like
       }
 
-      // Clean the segment
+      // Execute segment cleaning
       const segmentIds = [room.segmentId];
 
       if (typeof (this.vacuum as any).cleanSegments === 'function') {
@@ -114,18 +128,25 @@ export class DreameL20Accessory {
       } else if (typeof (this.vacuum as any).cleanSegment === 'function') {
         await (this.vacuum as any).cleanSegment(room.segmentId);
       } else {
-        this.log.warn('cleanSegments not found, falling back to start()');
+        this.log.warn('cleanSegments not available, falling back to start()');
         await this.vacuum.start();
       }
 
-      // Reset switch after short delay
+      // Reset switch (since segment cleaning is fire-and-forget)
       setTimeout(() => {
         service.updateCharacteristic(this.platform.api.hap.Characteristic.On, false);
       }, 2500);
 
     } catch (e: any) {
-      this.log.error(`Cleaning "${room.name}" failed:`, e.message);
+      this.log.error(`Failed to clean ${room.name}:`, e.message);
       service.updateCharacteristic(this.platform.api.hap.Characteristic.On, false);
     }
+  }
+
+  private isCurrentlyCleaning(state: any): boolean {
+    return state.miotState === 1 || 
+           state.miotStateRaw === 1 || 
+           state.taskStatusRaw === 1 || 
+           false;
   }
 }
