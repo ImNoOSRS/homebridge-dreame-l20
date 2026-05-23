@@ -40,8 +40,8 @@ export class DreameL20Accessory {
     // === MQTT Live Updates ===
     this.vacuum.watch().then(() => {
       this.log.info('✅ MQTT watch started for L20 Ultra');
-
       this.vacuum.on('change', (state: any) => {
+       this.log.info('Raw state:', JSON.stringify(state, null, 2));
         const now = Date.now();
         if (now - this.lastCommandTime < this.COMMAND_COOLDOWN_MS) return;
 
@@ -155,11 +155,12 @@ export class DreameL20Accessory {
       case 'mop':
         cleaningMode = 1;   // Mop only
         break;
+      //2 = Clean and Mop
       case 'vacuum_mop':
-        cleaningMode = 2;   // Vacuum then Mop
+        cleaningMode = 3;   // Vacuum then Mop
         break;
       default:
-        cleaningMode = 2;
+        cleaningMode = 3;
     }
 
     await (this.vacuum as any).setCleaningMode(cleaningMode);
